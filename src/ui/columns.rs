@@ -79,6 +79,30 @@ impl JobColumn {
         }
     }
 
+    /// Get the `sacct --format` field name for this column.
+    pub fn sacct_field(&self) -> &'static str {
+        match self {
+            JobColumn::Id => "JobIDRaw",
+            JobColumn::Name => "JobName",
+            JobColumn::User => "User",
+            JobColumn::State => "State",
+            JobColumn::Partition => "Partition",
+            JobColumn::QoS => "QOS",
+            JobColumn::Nodes => "NNodes",
+            JobColumn::Node => "NodeList",
+            JobColumn::CPUs => "AllocCPUS",
+            JobColumn::Time => "Elapsed",
+            JobColumn::Memory => "ReqMem",
+            JobColumn::Account => "Account",
+            JobColumn::Priority => "Priority",
+            JobColumn::WorkDir => "WorkDir",
+            JobColumn::SubmitTime => "Submit",
+            JobColumn::StartTime => "Start",
+            JobColumn::EndTime => "End",
+            JobColumn::PReason => "Reason",
+        }
+    }
+
     /// Get the default width constraint for this column
     pub fn default_width(&self) -> Constraint {
         match self {

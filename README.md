@@ -7,16 +7,15 @@ It provides an intuitive, interactive interface to view, filter, sort, and manag
 ## ✨ Features
 
 - **🔄 Real-time Job Monitoring**: View and refresh SLURM job statuses in real-time
-![](./images/monitor.png)
+  ![](./images/monitor.png)
 - **🔍 Advanced Filtering**: Filter jobs by user, state, partition, QoS, job name, and more in real-time(regex supported)
-![](./images/filter.png)
+  ![](./images/filter.png)
 - **📊 Customizable Columns**: Flexibly configure which job information columns to display and in what order
-![](./images/columns.png)
+  ![](./images/columns.png)
 - **📝 Job Details View**: Examine job scripts and job logs
-![](./images/script.png)<br>![](./images/log.png)
+  ![](./images/script.png)<br>![](./images/log.png)
 - **🎮 Job Management**: Cancel selected jobs
-![](./images/cancel.png)
-
+  ![](./images/cancel.png)
 
 <!-- | 🔄 **Real-time Job Monitoring** | 🔍 **Advanced Filtering** | 📊 **Customizable Columns** |
 |----------------------------------|---------------------------|------------------------------|
@@ -31,12 +30,12 @@ It provides an intuitive, interactive interface to view, filter, sort, and manag
 ```bash
 cargo install slurmer
 ```
+
 or install from the latest source code:
 
 ```bash
 cargo install --git https://github.com/wjwei-handsome/Slurmer.git
 ```
-
 
 ## 📖 Usage
 
@@ -66,6 +65,19 @@ More detailed keybindings can be found each popup menu.
 ## ⚙️ Configuration
 
 `slurmer` automatically detects available SLURM partitions and QoS in your system and uses the currently logged-in username as the default filter.
+
+## ✅ Testing
+
+- Unit tests:
+
+```bash
+cargo test
+```
+
+- Manual smoke test:
+  - Run `slurmer` and confirm the job list includes **active jobs** plus **recently-ended jobs** (default: last 24 hours).
+  - Press `f` and edit **Ended last (hours)**, apply filters (`Ctrl+a`), and confirm the list updates.
+  - If `sacct` is unavailable on the cluster, `slurmer` should still show active jobs and display a short status message.
 
 ## 👥 Contributing
 

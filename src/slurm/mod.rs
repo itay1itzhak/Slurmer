@@ -1,4 +1,5 @@
 pub mod command;
+pub mod sacct;
 pub mod squeue;
 
 use std::fmt;
@@ -56,7 +57,15 @@ impl FromStr for JobState {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_uppercase().as_str() {
+        let normalized = s
+            .trim()
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('+')
+            .to_uppercase();
+
+        match normalized.as_str() {
             "PENDING" | "PD" => Ok(JobState::Pending),
             "RUNNING" | "R" => Ok(JobState::Running),
             "COMPLETED" | "CD" | "COMPLETING" | "CG" => Ok(JobState::Completed),
@@ -68,6 +77,21 @@ impl FromStr for JobState {
             "BOOT_FAIL" | "BF" => Ok(JobState::Boot),
             _ => Ok(JobState::Other),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn job_state_parses_sacct_suffixes() {
+        assert_eq!("CANCELLED+".parse::<JobState>().unwrap(), JobState::Cancelled);
+        assert_eq!("FAILED+".parse::<JobState>().unwrap(), JobState::Failed);
+        assert_eq!(
+            "CANCELLED by 1234".parse::<JobState>().unwrap(),
+            JobState::Cancelled
+        );
     }
 }
 

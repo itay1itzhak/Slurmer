@@ -8,13 +8,17 @@ use ratatui::{
     Frame,
 };
 use regex;
+use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 
 use crate::{
     slurm::{
+        sacct::{run_sacct, SacctOptions},
         command::{execute_scancel, get_partitions, get_qos},
         squeue::{run_squeue, SqueueOptions},
+        Job,
         JobState,
     },
     ui::{
@@ -70,6 +74,10 @@ pub struct App {
     pub selected_columns: Vec<JobColumn>,
     /// Sort columns
     pub sort_columns: Vec<SortColumn>,
+    /// Include jobs that ended recently (from `sacct`)
+    pub include_recent_ended: bool,
+    /// Lookback window for ended jobs (hours)
+    pub recent_ended_hours: u32,
     /// Confirm cancel popup state
     cancel_confirm: bool,
 }
@@ -120,6 +128,8 @@ impl App {
             available_states,
             selected_columns,
             sort_columns,
+            include_recent_ended: true,
+            recent_ended_hours: 24,
             cancel_confirm: false,
         })
     }
@@ -150,6 +160,46 @@ impl App {
         let mut jobs = self
             .runtime
             .block_on(async { run_squeue(&options).await })?;
+
+        // Fetch recently-ended jobs (default: last 24 hours) via sacct and merge.
+        if self.include_recent_ended {
+            let terminal_states = vec![
+                JobState::Completed,
+                JobState::Failed,
+                JobState::Cancelled,
+                JobState::Timeout,
+                JobState::NodeFail,
+                JobState::Preempted,
+                JobState::Boot,
+            ];
+
+            let format_fields = self
+                .selected_columns
+                .iter()
+                .map(|c| c.sacct_field())
+                .collect::<Vec<_>>();
+
+            let sacct_options = SacctOptions {
+                user: options.user.clone(),
+                states: terminal_states,
+                partitions: options.partitions.clone(),
+                qos: options.qos.clone(),
+                recent_hours: self.recent_ended_hours,
+                format_fields,
+            };
+
+            match self.runtime.block_on(async { run_sacct(&sacct_options).await }) {
+                Ok(ended_jobs) => {
+                    jobs = merge_jobs_prefer_active(jobs, ended_jobs);
+                }
+                Err(e) => {
+                    self.set_status_message(
+                        format!("Recent-ended jobs unavailable (sacct): {}", e),
+                        3,
+                    );
+                }
+            }
+        }
 
         let mut filter_stats = Vec::new();
         let initial_count = jobs.len();
@@ -218,6 +268,21 @@ impl App {
             }
         }
 
+        // Apply explicit state filter (if user selected any) to the merged list.
+        if !self.squeue_options.states.is_empty() {
+            let before_count = jobs.len();
+            jobs.retain(|j| self.squeue_options.states.contains(&j.state));
+            let after_count = jobs.len();
+            if before_count != after_count && before_count > 0 {
+                filter_stats.push(format!(
+                    "state: {}/{} ({:.1}%)",
+                    after_count,
+                    before_count,
+                    (after_count as f64 / before_count as f64) * 100.0
+                ));
+            }
+        }
+
         // Show filter statistics if any filters were applied
         if !filter_stats.is_empty() {
             let final_count = jobs.len();
@@ -239,6 +304,7 @@ impl App {
             );
         }
 
+        sort_jobs(&mut jobs, &self.sort_columns);
         self.jobs_list.update_jobs(jobs);
         self.last_refresh = Instant::now();
 
@@ -449,7 +515,8 @@ impl App {
             (_, KeyCode::Char('f')) if !self.script_view.visible && !self.filter_popup.visible => {
                 self.filter_popup.visible = true;
                 // Initialize filter popup with current options
-                self.filter_popup.initialize(&self.squeue_options);
+                self.filter_popup
+                    .initialize(&self.squeue_options, self.recent_ended_hours);
             }
 
             // Navigation
@@ -539,6 +606,7 @@ impl App {
                     &self.available_states,
                     &self.available_partitions,
                     &self.available_qos,
+                    &mut self.recent_ended_hours,
                 );
 
                 match action {
@@ -563,6 +631,7 @@ impl App {
                     &self.available_states,
                     &self.available_partitions,
                     &self.available_qos,
+                    &mut self.recent_ended_hours,
                 );
 
                 match action {
@@ -823,6 +892,10 @@ impl App {
             parts.push(format!("node_regex={}", node));
         }
 
+        if self.include_recent_ended {
+            parts.push(format!("ended_last_hours={}", self.recent_ended_hours));
+        }
+
         parts.join(", ")
     }
 
@@ -899,5 +972,105 @@ impl App {
         } else {
             self.set_status_message(format!("Cancelled {} job(s)", selecteed_count), 3);
         }
+    }
+}
+
+fn merge_jobs_prefer_active(active_jobs: Vec<Job>, ended_jobs: Vec<Job>) -> Vec<Job> {
+    let mut by_id: HashMap<String, Job> = HashMap::new();
+
+    // Prefer active job records.
+    for job in ended_jobs {
+        if !job.id.is_empty() {
+            by_id.insert(job.id.clone(), job);
+        }
+    }
+    for job in active_jobs {
+        if !job.id.is_empty() {
+            by_id.insert(job.id.clone(), job);
+        }
+    }
+
+    by_id.into_values().collect()
+}
+
+fn sort_jobs(jobs: &mut [Job], sort_columns: &[SortColumn]) {
+    if sort_columns.is_empty() {
+        return;
+    }
+
+    jobs.sort_by(|a, b| {
+        for sc in sort_columns {
+            let ord = cmp_job_by_column(a, b, sc.column);
+            if ord != Ordering::Equal {
+                return match sc.order {
+                    SortOrder::Ascending => ord,
+                    SortOrder::Descending => ord.reverse(),
+                };
+            }
+        }
+        Ordering::Equal
+    });
+}
+
+fn cmp_job_by_column(a: &Job, b: &Job, column: JobColumn) -> Ordering {
+    match column {
+        JobColumn::Id => {
+            let na = parse_job_id_numeric(&a.id);
+            let nb = parse_job_id_numeric(&b.id);
+            match (na, nb) {
+                (Some(na), Some(nb)) => na.cmp(&nb),
+                _ => a.id.cmp(&b.id),
+            }
+        }
+        JobColumn::Name => a.name.cmp(&b.name),
+        JobColumn::User => a.user.cmp(&b.user),
+        JobColumn::State => a.state.to_string().cmp(&b.state.to_string()),
+        JobColumn::Partition => a.partition.cmp(&b.partition),
+        JobColumn::QoS => a.qos.cmp(&b.qos),
+        JobColumn::Nodes => a.nodes.cmp(&b.nodes),
+        JobColumn::Node => a.node.as_deref().unwrap_or("").cmp(b.node.as_deref().unwrap_or("")),
+        JobColumn::CPUs => a.cpus.cmp(&b.cpus),
+        JobColumn::Time => a.time.cmp(&b.time),
+        JobColumn::Memory => a.memory.cmp(&b.memory),
+        JobColumn::Account => a
+            .account
+            .as_deref()
+            .unwrap_or("")
+            .cmp(b.account.as_deref().unwrap_or("")),
+        JobColumn::Priority => a.priority.unwrap_or(0).cmp(&b.priority.unwrap_or(0)),
+        JobColumn::WorkDir => a
+            .work_dir
+            .as_deref()
+            .unwrap_or("")
+            .cmp(b.work_dir.as_deref().unwrap_or("")),
+        JobColumn::SubmitTime => a
+            .submit_time
+            .as_deref()
+            .unwrap_or("")
+            .cmp(b.submit_time.as_deref().unwrap_or("")),
+        JobColumn::StartTime => a
+            .start_time
+            .as_deref()
+            .unwrap_or("")
+            .cmp(b.start_time.as_deref().unwrap_or("")),
+        JobColumn::EndTime => a
+            .end_time
+            .as_deref()
+            .unwrap_or("")
+            .cmp(b.end_time.as_deref().unwrap_or("")),
+        JobColumn::PReason => a
+            .pending_reason
+            .as_deref()
+            .unwrap_or("")
+            .cmp(b.pending_reason.as_deref().unwrap_or("")),
+    }
+}
+
+fn parse_job_id_numeric(job_id: &str) -> Option<u64> {
+    let digits: String = job_id.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse::<u64>().ok()
     }
 }

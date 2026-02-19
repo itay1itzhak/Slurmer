@@ -30,6 +30,10 @@ pub struct FilterPopup {
     pub name_filter: String,
     /// Node regex filter
     pub node_filter: String,
+    /// Recent-ended jobs lookback window (hours), as input text
+    pub ended_hours: String,
+    /// Whether the ended-hours input is valid
+    pub ended_hours_valid: Option<bool>,
     /// Whether the name regex is valid
     pub name_regex_valid: Option<bool>,
     /// Whether the node regex is valid
@@ -42,6 +46,7 @@ pub struct FilterPopup {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterFocus {
     Username,
+    EndedHours,
     States,
     Partitions,
     QoS,
@@ -71,6 +76,8 @@ impl FilterPopup {
             qos_list_state,
             name_filter: String::new(),
             node_filter: String::new(),
+            ended_hours: String::new(),
+            ended_hours_valid: None,
             name_regex_valid: None,
             node_regex_valid: None,
             visible: false,
@@ -78,10 +85,12 @@ impl FilterPopup {
     }
 
     /// Initialize filter popup with current options
-    pub fn initialize(&mut self, options: &SqueueOptions) {
+    pub fn initialize(&mut self, options: &SqueueOptions, recent_ended_hours: u32) {
         self.username = options.user.clone().unwrap_or_default();
         self.name_filter = options.name_filter.clone().unwrap_or_default();
         self.node_filter = options.node_filter.clone().unwrap_or_default();
+        self.ended_hours = recent_ended_hours.to_string();
+        self.validate_ended_hours();
 
         // Validate regex if name_filter is not empty
         if !self.name_filter.is_empty() {
@@ -122,6 +131,18 @@ impl FilterPopup {
             Ok(_) => self.node_regex_valid = Some(true),
             Err(_) => self.node_regex_valid = Some(false),
         }
+    }
+
+    fn validate_ended_hours(&mut self) {
+        let trimmed = self.ended_hours.trim();
+        if trimmed.is_empty() {
+            self.ended_hours_valid = Some(false);
+            return;
+        }
+        self.ended_hours_valid = match trimmed.parse::<u32>() {
+            Ok(v) if v >= 1 => Some(true),
+            _ => Some(false),
+        };
     }
 
     /// Render the filter popup
@@ -188,9 +209,10 @@ impl FilterPopup {
             .direction(Direction::Horizontal)
             .margin(1)
             .constraints([
-                Constraint::Ratio(1, 3), // Username
-                Constraint::Ratio(1, 3), // Job name filter
-                Constraint::Ratio(1, 3), // Node filter
+                Constraint::Ratio(1, 4), // Username
+                Constraint::Ratio(1, 4), // Ended hours
+                Constraint::Ratio(1, 4), // Job name filter
+                Constraint::Ratio(1, 4), // Node filter
             ])
             .split(area);
 
@@ -207,6 +229,25 @@ impl FilterPopup {
         let username_text = Paragraph::new(self.username.clone()).block(username_block);
 
         frame.render_widget(username_text, chunks[0]);
+
+        // Ended hours field
+        let ended_title = match self.ended_hours_valid {
+            Some(true) => "Ended last (hours) ✓",
+            Some(false) => "Ended last (hours) ✗ Invalid",
+            None => "Ended last (hours)",
+        };
+        let ended_block_style = match (self.focus == FilterFocus::EndedHours, self.ended_hours_valid)
+        {
+            (true, _) => Style::default().fg(Color::Cyan),
+            (false, Some(false)) => Style::default().fg(Color::Red),
+            _ => Style::default(),
+        };
+        let ended_block = Block::default()
+            .title(ended_title)
+            .borders(Borders::ALL)
+            .style(ended_block_style);
+        let ended_text = Paragraph::new(self.ended_hours.clone()).block(ended_block);
+        frame.render_widget(ended_text, chunks[1]);
 
         // Job name filter field
         // Show validation status in the title for name filter
@@ -232,7 +273,7 @@ impl FilterPopup {
 
         let name_filter_text = Paragraph::new(self.name_filter.clone()).block(name_filter_block);
 
-        frame.render_widget(name_filter_text, chunks[1]);
+        frame.render_widget(name_filter_text, chunks[2]);
 
         // Node filter field
         // Show validation status in the title for node filter
@@ -258,7 +299,7 @@ impl FilterPopup {
 
         let node_filter_text = Paragraph::new(self.node_filter.clone()).block(node_filter_block);
 
-        frame.render_widget(node_filter_text, chunks[2]);
+        frame.render_widget(node_filter_text, chunks[3]);
 
         // Show cursor when in input mode
         if self.input_mode {
@@ -267,13 +308,17 @@ impl FilterPopup {
                     chunks[0].x + 1 + self.username.len() as u16,
                     chunks[0].y + 1,
                 ),
-                FilterFocus::NameFilter => (
-                    chunks[1].x + 1 + self.name_filter.len() as u16,
+                FilterFocus::EndedHours => (
+                    chunks[1].x + 1 + self.ended_hours.len() as u16,
                     chunks[1].y + 1,
                 ),
-                FilterFocus::NodeFilter => (
-                    chunks[2].x + 1 + self.node_filter.len() as u16,
+                FilterFocus::NameFilter => (
+                    chunks[2].x + 1 + self.name_filter.len() as u16,
                     chunks[2].y + 1,
+                ),
+                FilterFocus::NodeFilter => (
+                    chunks[3].x + 1 + self.node_filter.len() as u16,
+                    chunks[3].y + 1,
                 ),
                 _ => (0, 0),
             };
@@ -412,6 +457,7 @@ impl FilterPopup {
         all_states: &[JobState],
         all_partitions: &[String],
         all_qos: &[String],
+        recent_ended_hours: &mut u32,
     ) -> FilterAction {
         use crossterm::event::KeyCode;
 
@@ -435,14 +481,17 @@ impl FilterPopup {
 
         // Handle input mode separately
         if self.input_mode {
-            return self.handle_input_mode(key, options);
+            return self.handle_input_mode(key, options, recent_ended_hours);
         }
 
         // Normal navigation mode
         match key.code {
             KeyCode::Enter => {
                 match self.focus {
-                    FilterFocus::Username | FilterFocus::NameFilter | FilterFocus::NodeFilter => {
+                    FilterFocus::Username
+                    | FilterFocus::EndedHours
+                    | FilterFocus::NameFilter
+                    | FilterFocus::NodeFilter => {
                         self.input_mode = true;
                         FilterAction::None
                     }
@@ -566,7 +615,7 @@ impl FilterPopup {
                     self.update_focus_for_tab();
                     return FilterAction::None;
                 } else if self.tab_index == 0 {
-                    self.tab_index = 5; // Wrap around to last tab
+                    self.tab_index = 6; // Wrap around to last tab
                     self.update_focus_for_tab();
                     return FilterAction::None;
                 } else {
@@ -575,11 +624,11 @@ impl FilterPopup {
             }
             KeyCode::Right => {
                 // Change tab
-                if self.tab_index < 5 {
+                if self.tab_index < 6 {
                     self.tab_index += 1;
                     self.update_focus_for_tab();
                     return FilterAction::None;
-                } else if self.tab_index == 5 {
+                } else if self.tab_index == 6 {
                     self.tab_index = 0; // Wrap around to first tab
                     self.update_focus_for_tab();
                     return FilterAction::None;
@@ -596,6 +645,7 @@ impl FilterPopup {
         &mut self,
         key: crossterm::event::KeyEvent,
         options: &mut SqueueOptions,
+        recent_ended_hours: &mut u32,
     ) -> FilterAction {
         use crossterm::event::KeyCode;
 
@@ -608,6 +658,15 @@ impl FilterPopup {
                             options.user = None;
                         } else {
                             options.user = Some(self.username.clone());
+                        }
+                    }
+                    FilterFocus::EndedHours => {
+                        if self.ended_hours_valid == Some(true) {
+                            if let Ok(v) = self.ended_hours.trim().parse::<u32>() {
+                                if v >= 1 {
+                                    *recent_ended_hours = v;
+                                }
+                            }
                         }
                     }
                     FilterFocus::NameFilter => {
@@ -641,6 +700,10 @@ impl FilterPopup {
                 // Add character to input
                 match self.focus {
                     FilterFocus::Username => self.username.push(c),
+                    FilterFocus::EndedHours => {
+                        self.ended_hours.push(c);
+                        self.validate_ended_hours();
+                    }
                     FilterFocus::NameFilter => {
                         self.name_filter.push(c);
                         self.validate_name_regex();
@@ -658,6 +721,10 @@ impl FilterPopup {
                 match self.focus {
                     FilterFocus::Username => {
                         let _ = self.username.pop();
+                    }
+                    FilterFocus::EndedHours => {
+                        let _ = self.ended_hours.pop();
+                        self.validate_ended_hours();
                     }
                     FilterFocus::NameFilter => {
                         let _ = self.name_filter.pop();
@@ -679,11 +746,12 @@ impl FilterPopup {
     fn update_focus_for_tab(&mut self) {
         match self.tab_index {
             0 => self.focus = FilterFocus::Username,
-            1 => self.focus = FilterFocus::NameFilter,
-            2 => self.focus = FilterFocus::NodeFilter,
-            3 => self.focus = FilterFocus::States,
-            4 => self.focus = FilterFocus::Partitions,
-            5 => self.focus = FilterFocus::QoS,
+            1 => self.focus = FilterFocus::EndedHours,
+            2 => self.focus = FilterFocus::NameFilter,
+            3 => self.focus = FilterFocus::NodeFilter,
+            4 => self.focus = FilterFocus::States,
+            5 => self.focus = FilterFocus::Partitions,
+            6 => self.focus = FilterFocus::QoS,
             _ => {}
         }
     }
