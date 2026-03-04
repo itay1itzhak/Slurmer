@@ -15,7 +15,6 @@ pub enum JobColumn {
     User,
     State,
     Partition,
-    QoS,
     Nodes,
     Node,
     CPUs,
@@ -39,7 +38,6 @@ impl JobColumn {
             JobColumn::User => "User",
             JobColumn::State => "State",
             JobColumn::Partition => "Partition",
-            JobColumn::QoS => "QoS",
             JobColumn::Nodes => "Nodes",
             JobColumn::Node => "Node",
             JobColumn::CPUs => "CPUs",
@@ -63,7 +61,6 @@ impl JobColumn {
             JobColumn::User => "%u",       // User name
             JobColumn::State => "%T",      // Job state
             JobColumn::Partition => "%P",  // Partition
-            JobColumn::QoS => "%q",        // Quality of Service
             JobColumn::Nodes => "%D",      // Node count
             JobColumn::Node => "%N",       // Node list
             JobColumn::CPUs => "%C",       // CPU count
@@ -87,7 +84,6 @@ impl JobColumn {
             JobColumn::User => "User",
             JobColumn::State => "State",
             JobColumn::Partition => "Partition",
-            JobColumn::QoS => "QOS",
             JobColumn::Nodes => "NNodes",
             JobColumn::Node => "NodeList",
             JobColumn::CPUs => "AllocCPUS",
@@ -111,7 +107,6 @@ impl JobColumn {
             JobColumn::User => Constraint::Length(10),
             JobColumn::State => Constraint::Length(12),
             JobColumn::Partition => Constraint::Length(12),
-            JobColumn::QoS => Constraint::Length(10),
             JobColumn::Nodes => Constraint::Length(7),
             JobColumn::Node => Constraint::Percentage(12), // Node list can be long
             JobColumn::CPUs => Constraint::Length(6),
@@ -135,7 +130,6 @@ impl JobColumn {
             JobColumn::User,
             JobColumn::State,
             JobColumn::Partition,
-            JobColumn::QoS,
             JobColumn::Nodes,
             JobColumn::Node,
             JobColumn::CPUs,
@@ -154,7 +148,7 @@ impl JobColumn {
     /// Default columns to display
     pub fn defaults() -> Vec<JobColumn> {
         // These MUST match the defaults in App::new()
-        // "%i|%j|%u|%T|%M|%N|%C|%m|%P|%q".to_string(), // JobID|Name|User|State|Time|Nodes|CPUs|Memory|Partition|QOS
+        // "%i|%j|%u|%T|%M|%N|%C|%m|%P|%V|%e".to_string(),
         vec![
             JobColumn::Id,
             JobColumn::Name,
@@ -165,7 +159,8 @@ impl JobColumn {
             JobColumn::CPUs,
             JobColumn::Memory,
             JobColumn::Partition,
-            JobColumn::QoS,
+            JobColumn::SubmitTime,
+            JobColumn::EndTime,
         ]
     }
 }

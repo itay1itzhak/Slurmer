@@ -8,7 +8,15 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
-use std::{collections::HashMap, iter::once, path::PathBuf, process::Command, time::Duration};
+use std::{
+    collections::HashMap,
+    iter::once,
+    path::{Path, PathBuf},
+    process::Command,
+    time::SystemTime,
+    time::Duration,
+};
+use walkdir::WalkDir;
 
 use crate::utils::file_watcher::{FileWatcherError, FileWatcherHandle};
 
@@ -44,6 +52,8 @@ pub struct LogView {
     pub scroll_position: usize,
     pub stdout_path: Option<String>,
     pub stderr_path: Option<String>,
+    slurm_logs_dir: Option<PathBuf>,
+    resolved_cache: HashMap<String, (Option<String>, Option<String>)>,
     file_watcher: Option<FileWatcherHandle>,
     file_receiver: Option<Receiver<Result<String, FileWatcherError>>>,
     refresh_interval: Duration,
@@ -72,11 +82,19 @@ impl LogView {
             scroll_position: 0,
             stdout_path: None,
             stderr_path: None,
+            slurm_logs_dir: None,
+            resolved_cache: HashMap::new(),
             file_watcher: None,
             file_receiver: None,
             refresh_interval: Duration::from_secs(2),
             file_status: LogFileStatus::NotFound,
         }
+    }
+
+    pub fn set_slurm_logs_dir(&mut self, dir: Option<PathBuf>) {
+        self.slurm_logs_dir = dir;
+        // Cached paths depend on this directory; flush.
+        self.resolved_cache.clear();
     }
 
     /// Show the log view for a specific job
@@ -102,6 +120,7 @@ impl LogView {
         // self.content = String::new();
         self.scroll_position = 0;
         self.file_status = LogFileStatus::NotFound;
+        self.content.clear();
 
         // Fetch the log file paths
         self.fetch_log_paths();
@@ -141,8 +160,13 @@ impl LogView {
                 _ => {
                     // Either no path or empty path
                     watcher.set_file_path(None);
-                    self.file_status = LogFileStatus::NotFound;
-                    self.content = String::new();
+                    // If we already have an error/diagnostic message prepared (e.g. sacct fallback
+                    // couldn't resolve a path), keep it visible instead of overwriting it with the
+                    // generic NotFound state.
+                    if self.file_status != LogFileStatus::Error {
+                        self.file_status = LogFileStatus::NotFound;
+                        self.content = String::new();
+                    }
                 }
             }
         }
@@ -380,9 +404,9 @@ impl LogView {
 
     /// Fetch the stdout and stderr paths for the current job
     fn fetch_log_paths(&mut self) {
-        if let Some(job_id) = &self.job_id {
+        if let Some(job_id) = self.job_id.clone() {
             let output = Command::new("scontrol")
-                .args(["show", "job", job_id, "-o"])
+                .args(["show", "job", job_id.as_str(), "-o"])
                 .output();
 
             if let Ok(output) = output {
@@ -407,18 +431,156 @@ impl LogView {
 
                     if has_path {
                         self.file_status = LogFileStatus::Waiting;
-                    } else {
-                        self.file_status = LogFileStatus::NotFound;
+                        return;
                     }
-                } else {
-                    self.file_status = LogFileStatus::Error;
                 }
+            }
+
+            // Fallback for jobs that are no longer in `scontrol` (or don't have StdOut/StdErr
+            // fields available): try to infer log paths from `sacct` WorkDir and the default
+            // Slurm output filename.
+            if self.try_resolve_logs_via_sacct(job_id.as_str()) {
+                self.file_status = LogFileStatus::Waiting;
             } else {
                 self.file_status = LogFileStatus::Error;
             }
         } else {
             self.file_status = LogFileStatus::NotFound;
         }
+    }
+
+    fn try_resolve_logs_via_sacct(&mut self, job_id: &str) -> bool {
+        // Cached?
+        if let Some((out, err)) = self.resolved_cache.get(job_id).cloned() {
+            self.stdout_path = out.clone();
+            self.stderr_path = err.clone().or_else(|| out.clone());
+            return match self.current_tab {
+                LogTab::StdOut => self
+                    .stdout_path
+                    .as_ref()
+                    .is_some_and(|p| !p.trim().is_empty()),
+                LogTab::StdErr => self
+                    .stderr_path
+                    .as_ref()
+                    .is_some_and(|p| !p.trim().is_empty()),
+            };
+        }
+
+        // Preferred fallback: search under configured slurm logs directory.
+        if let Some(root) = &self.slurm_logs_dir {
+            if let Ok((out, err, stats)) = search_slurm_logs(root, job_id) {
+                self.stdout_path = out.as_ref().map(|p| p.to_string_lossy().to_string());
+                self.stderr_path = err.as_ref().map(|p| p.to_string_lossy().to_string());
+                if self.stderr_path.is_none() {
+                    self.stderr_path = self.stdout_path.clone();
+                }
+
+                let ok_for_tab = match self.current_tab {
+                    LogTab::StdOut => self
+                        .stdout_path
+                        .as_ref()
+                        .is_some_and(|p| !p.trim().is_empty()),
+                    LogTab::StdErr => self
+                        .stderr_path
+                        .as_ref()
+                        .is_some_and(|p| !p.trim().is_empty()),
+                };
+
+                self.resolved_cache.insert(
+                    job_id.to_string(),
+                    (self.stdout_path.clone(), self.stderr_path.clone()),
+                );
+
+                if !ok_for_tab {
+                    self.content = format!(
+                        "Could not resolve log path for job {}.\n\nslurm_logs_dir: {}\npattern: *{}*.out / *{}*.err\nscanned_files: {}\nmatched_files: {}\nhit_scan_limit: {}\n\nTip: open Settings (s) to set Slurm logs dir, or set SLURMER_SLURM_LOGS_DIR.",
+                        job_id,
+                        root.to_string_lossy(),
+                        job_id,
+                        job_id,
+                        stats.scanned_files,
+                        stats.matched_files
+                        ,stats.hit_limit
+                    );
+                }
+
+                return ok_for_tab;
+            }
+        }
+
+        let workdir = fetch_workdir_from_sacct(job_id);
+
+        let mut tried = Vec::new();
+        let mut candidate_dirs: Vec<PathBuf> = Vec::new();
+
+        if let Some(w) = &workdir {
+            candidate_dirs.push(PathBuf::from(w));
+        };
+
+        if let Ok(home) = std::env::var("HOME") {
+            if !home.trim().is_empty() {
+                candidate_dirs.push(PathBuf::from(home));
+            }
+        }
+
+        candidate_dirs.dedup();
+
+        let mut found_stdout: Option<PathBuf> = None;
+        let mut found_stderr: Option<PathBuf> = None;
+
+        for dir in &candidate_dirs {
+            let out = dir.join(format!("slurm-{}.out", job_id));
+            tried.push(out.to_string_lossy().to_string());
+            if found_stdout.is_none() && out.exists() {
+                found_stdout = Some(out);
+            }
+
+            let err = dir.join(format!("slurm-{}.err", job_id));
+            tried.push(err.to_string_lossy().to_string());
+            if found_stderr.is_none() && err.exists() {
+                found_stderr = Some(err);
+            }
+        }
+
+        self.stdout_path = found_stdout.map(|p| p.to_string_lossy().to_string());
+        self.stderr_path = found_stderr.map(|p| p.to_string_lossy().to_string());
+
+        // Common Slurm default: stderr goes to the same file as stdout unless -e is set.
+        if self.stderr_path.is_none() {
+            self.stderr_path = self.stdout_path.clone();
+        }
+
+        // If we still couldn't find a file for this tab, surface useful diagnostics.
+        let ok_for_tab = match self.current_tab {
+            LogTab::StdOut => self
+                .stdout_path
+                .as_ref()
+                .is_some_and(|p| !p.trim().is_empty()),
+            LogTab::StdErr => self
+                .stderr_path
+                .as_ref()
+                .is_some_and(|p| !p.trim().is_empty()),
+        };
+        if !ok_for_tab {
+            let wd = workdir.unwrap_or_else(|| "Unknown".to_string());
+            self.content = format!(
+                "Could not resolve log path for job {}.\n\nsacct WorkDir: {}\n\nTried:\n{}",
+                job_id,
+                wd,
+                tried
+                    .into_iter()
+                    .map(|p| format!("- {}", p))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
+
+        self.resolved_cache.insert(
+            job_id.to_string(),
+            (self.stdout_path.clone(), self.stderr_path.clone()),
+        );
+
+        ok_for_tab
     }
 }
 
@@ -434,4 +596,140 @@ fn parse_scontrol_output(output: &str) -> HashMap<String, String> {
     }
 
     result
+}
+
+fn fetch_workdir_from_sacct(job_id: &str) -> Option<String> {
+    let output = Command::new("sacct")
+        .args([
+            "-n",
+            "-P",
+            "-X",
+            "-j",
+            job_id,
+            "--format=WorkDir",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let v = line.split('|').next().unwrap_or("").trim();
+        if v.is_empty() || v == "Unknown" || v == "N/A" {
+            continue;
+        }
+        return Some(v.to_string());
+    }
+
+    None
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SearchStats {
+    scanned_files: usize,
+    matched_files: usize,
+    hit_limit: bool,
+}
+
+fn search_slurm_logs(root: &Path, job_id: &str) -> Result<(Option<PathBuf>, Option<PathBuf>, SearchStats)> {
+    let mut newest_out: Option<(SystemTime, PathBuf)> = None;
+    let mut newest_err: Option<(SystemTime, PathBuf)> = None;
+
+    let mut scanned = 0usize;
+    let mut matched = 0usize;
+    let max_scan = 200_000usize;
+    let mut hit_limit = false;
+
+    for entry in WalkDir::new(root).follow_links(false).into_iter().filter_map(|e| e.ok()) {
+        if scanned >= max_scan {
+            hit_limit = true;
+            break;
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        scanned += 1;
+
+        let name = entry.file_name().to_string_lossy();
+        if !name.contains(job_id) {
+            continue;
+        }
+        matched += 1;
+
+        let path = entry.path().to_path_buf();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        if ext != "out" && ext != "err" {
+            continue;
+        }
+
+        let mtime = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+
+        if ext == "out" {
+            if newest_out
+                .as_ref()
+                .map(|(t, _)| mtime > *t)
+                .unwrap_or(true)
+            {
+                newest_out = Some((mtime, path));
+            }
+        } else if ext == "err" {
+            if newest_err
+                .as_ref()
+                .map(|(t, _)| mtime > *t)
+                .unwrap_or(true)
+            {
+                newest_err = Some((mtime, path));
+            }
+        }
+    }
+
+    let out = newest_out.map(|(_, p)| p);
+    let err = newest_err.map(|(_, p)| p);
+    Ok((
+        out,
+        err,
+        SearchStats {
+            scanned_files: scanned,
+            matched_files: matched,
+            hit_limit,
+        },
+    ))
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn finds_newest_out_by_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = dir.path().join("job_123.out");
+        let p2 = dir.path().join("job_123_newer.out");
+        fs::write(&p1, "old").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::write(&p2, "new").unwrap();
+
+        let (out, _err, _stats) = search_slurm_logs(dir.path(), "123").unwrap();
+        assert_eq!(out.unwrap(), p2);
+    }
+
+    #[test]
+    fn finds_err_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("x_123.out");
+        let err = dir.path().join("x_123.err");
+        fs::write(&out, "o").unwrap();
+        fs::write(&err, "e").unwrap();
+
+        let (_out, found_err, _stats) = search_slurm_logs(dir.path(), "123").unwrap();
+        assert_eq!(found_err.unwrap(), err);
+    }
 }

@@ -47,6 +47,7 @@ Just run `slurmer`.
 - <kbd>Shift + ↓/↑</kbd>: Move job in the log-view/script-view
 - <kbd>f</kbd>: Open filter menu
 - <kbd>c</kbd>: Open column selection menu
+- <kbd>s</kbd>: Open settings (e.g. slurm logs dir)
 - <kbd>v</kbd>: View job logs
 - <kbd>Enter</kbd>: View job script
 - <kbd>Space</kbd>: Select job
@@ -65,6 +66,8 @@ More detailed keybindings can be found each popup menu.
 ## ⚙️ Configuration
 
 `slurmer` automatically detects available SLURM partitions and QoS in your system and uses the currently logged-in username as the default filter.
+
+To enable viewing logs for completed jobs (when `scontrol` can no longer return `StdOut/StdErr`), configure a base directory to search:\n+\n+- In-app: press `s` and set **Slurm logs dir** (saved to `~/.config/slurmer/config.toml`)\n+- Or environment: set `SLURMER_SLURM_LOGS_DIR=/path/to/slurm_logs` (overrides config file)
 
 ## ✅ Testing
 

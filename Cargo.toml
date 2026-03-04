@@ -18,3 +18,9 @@ color-eyre = "0.6.3"
 tokio = { version = "1.36.0", features = ["rt-multi-thread"] }
 async-process = "2.1.0"
 regex = "1.10.2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"

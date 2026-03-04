@@ -35,7 +35,7 @@ impl Default for SqueueOptions {
             qos: Vec::new(),
             name_filter: None,
             node_filter: None,
-            format: "%i|%j|%u|%T|%M|%N|%C|%m|%P|%q".to_string(), // JobID|Name|User|State|Time|Nodes|CPUs|Memory|Partition|QOS
+            format: "%i|%j|%u|%T|%M|%N|%C|%m|%P|%V|%e".to_string(), // JobID|Name|User|State|Time|NodeList|CPUs|Memory|Partition|Submit|End
             sorts,
         }
     }

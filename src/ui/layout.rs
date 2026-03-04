@@ -79,6 +79,7 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, job_stat: (usize, usize, usize
         ("Enter", "Script"),
         ("f", "Filter"),
         ("c", "Columns"),
+        ("s", "Settings"),
         ("v", "Log"),
         ("a", "SelectAll"),
         ("r", "Refresh"),

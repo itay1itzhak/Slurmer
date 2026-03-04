@@ -10,10 +10,12 @@ use ratatui::{
 use regex;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 
 use crate::{
+    config::{load_config, resolve_slurm_logs_dir},
     slurm::{
         sacct::{run_sacct, SacctOptions},
         command::{execute_scancel, get_partitions, get_qos},
@@ -28,6 +30,7 @@ use crate::{
         jobslist::JobsList,
         layout::{centered_popup_area, draw_footer, draw_header, draw_main_layout},
         logview::LogView,
+        settings::{SettingsAction, SettingsPopup},
     },
     utils::{
         event::{Event as AppEvent, EventConfig, EventHandler},
@@ -51,6 +54,8 @@ pub struct App {
     pub last_refresh: Instant,
     /// Filter popup state
     pub filter_popup: FilterPopup,
+    /// Settings popup state
+    pub settings_popup: SettingsPopup,
     /// Is the job detail popup visible?
     /// Columns popup state
     pub columns_popup: ColumnsPopup,
@@ -78,6 +83,8 @@ pub struct App {
     pub include_recent_ended: bool,
     /// Lookback window for ended jobs (hours)
     pub recent_ended_hours: u32,
+    /// Base directory used to search for completed-job logs (if configured).
+    pub slurm_logs_dir: Option<PathBuf>,
     /// Confirm cancel popup state
     cancel_confirm: bool,
 }
@@ -104,10 +111,19 @@ impl App {
 
         // Default columns and sort options
         let selected_columns = JobColumn::defaults();
-        let sort_columns = vec![SortColumn {
-            column: JobColumn::Id,
-            order: SortOrder::Ascending,
-        }];
+        let sort_columns = vec![
+            SortColumn {
+                column: JobColumn::State,
+                order: SortOrder::Ascending,
+            },
+            SortColumn {
+                column: JobColumn::Id,
+                order: SortOrder::Ascending,
+            },
+        ];
+
+        let cfg = load_config().unwrap_or_default();
+        let slurm_logs_dir = resolve_slurm_logs_dir(&cfg);
 
         Ok(Self {
             running: true,
@@ -117,6 +133,7 @@ impl App {
             runtime,
             last_refresh: Instant::now(),
             filter_popup: FilterPopup::new(),
+            settings_popup: SettingsPopup::new(),
             columns_popup: ColumnsPopup::new(selected_columns.clone(), sort_columns.clone()),
             log_view: LogView::new(),
             script_view: JobScript::new(),
@@ -130,6 +147,7 @@ impl App {
             sort_columns,
             include_recent_ended: true,
             recent_ended_hours: 24,
+            slurm_logs_dir,
             cancel_confirm: false,
         })
     }
@@ -332,6 +350,11 @@ impl App {
             self.render_filter_popup(frame, popup_area);
         }
 
+        if self.settings_popup.visible {
+            let popup_area = centered_popup_area(frame.area(), 80, 40);
+            self.settings_popup.render(frame, popup_area);
+        }
+
         // If job detail popup is visible, draw it
         if self.script_view.visible {
             let popup_area = centered_popup_area(frame.area(), 80, 60);
@@ -496,12 +519,14 @@ impl App {
             // Quit application
             (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
                 if self.filter_popup.visible
+                    || self.settings_popup.visible
                     || self.script_view.visible
                     || self.columns_popup.visible
                     || self.log_view.visible
                     || self.cancel_confirm
                 {
                     self.filter_popup.visible = false;
+                    self.settings_popup.visible = false;
                     self.script_view.visible = false;
                     self.columns_popup.visible = false;
                     self.log_view.hide();
@@ -517,6 +542,23 @@ impl App {
                 // Initialize filter popup with current options
                 self.filter_popup
                     .initialize(&self.squeue_options, self.recent_ended_hours);
+            }
+
+            (_, KeyCode::Char('s'))
+                if !self.filter_popup.visible
+                    && !self.settings_popup.visible
+                    && !self.script_view.visible
+                    && !self.columns_popup.visible
+                    && !self.log_view.visible
+                    && !self.cancel_confirm =>
+            {
+                self.settings_popup.visible = true;
+                self.settings_popup.initialize(
+                    self.slurm_logs_dir
+                        .as_ref()
+                        .and_then(|p| p.to_str())
+                        .or(Some("")),
+                );
             }
 
             // Navigation
@@ -694,11 +736,14 @@ impl App {
             // Show log view
             (_, KeyCode::Char('v'))
                 if !self.filter_popup.visible
+                    && !self.settings_popup.visible
                     && !self.script_view.visible
                     && !self.columns_popup.visible
                     && !self.log_view.visible =>
             {
                 if let Some(job) = self.jobs_list.selected_job() {
+                    self.log_view
+                        .set_slurm_logs_dir(self.slurm_logs_dir.clone());
                     self.log_view.show(job.id.clone());
                 }
             }
@@ -725,6 +770,24 @@ impl App {
             _ if self.log_view.visible => {
                 // If log view is visible, handle log view specific keys
                 self.log_view.handle_key(key);
+            }
+
+            _ if self.settings_popup.visible => {
+                let action = self.settings_popup.handle_key(key);
+                match action {
+                    SettingsAction::Close => {
+                        self.settings_popup.visible = false;
+                    }
+                    SettingsAction::Saved => {
+                        self.slurm_logs_dir = self
+                            .settings_popup
+                            .current_value()
+                            .map(PathBuf::from);
+                        self.log_view
+                            .set_slurm_logs_dir(self.slurm_logs_dir.clone());
+                    }
+                    SettingsAction::None => {}
+                }
             }
 
             // Handle columns popup key events
@@ -1026,7 +1089,6 @@ fn cmp_job_by_column(a: &Job, b: &Job, column: JobColumn) -> Ordering {
         JobColumn::User => a.user.cmp(&b.user),
         JobColumn::State => a.state.to_string().cmp(&b.state.to_string()),
         JobColumn::Partition => a.partition.cmp(&b.partition),
-        JobColumn::QoS => a.qos.cmp(&b.qos),
         JobColumn::Nodes => a.nodes.cmp(&b.nodes),
         JobColumn::Node => a.node.as_deref().unwrap_or("").cmp(b.node.as_deref().unwrap_or("")),
         JobColumn::CPUs => a.cpus.cmp(&b.cpus),

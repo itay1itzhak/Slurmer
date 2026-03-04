@@ -227,7 +227,6 @@ impl JobsList {
                         JobColumn::User => job.user.clone(),
                         JobColumn::State => job.state.to_string(),
                         JobColumn::Partition => job.partition.clone(),
-                        JobColumn::QoS => job.qos.clone(),
                         JobColumn::Nodes => job.nodes.to_string(),
                         JobColumn::Node => job.node.clone().unwrap_or_else(|| "-".to_string()),
                         JobColumn::CPUs => job.cpus.to_string(),
@@ -268,6 +267,22 @@ impl JobsList {
         // let available_width = area.width.saturating_sub(2); // Subtract 2 for borders
 
         // Get constraints for columns using the default_width method from JobColumn
+        let name_width = if self.jobs.is_empty() {
+            None
+        } else {
+            let max_len = self
+                .jobs
+                .iter()
+                .map(|j| {
+                    let n = j.name.chars().count();
+                    if n > 30 { 30 } else { n }
+                })
+                .max()
+                .unwrap_or(0);
+            let clamped = max_len.clamp(10, 30) as u16;
+            Some(clamped)
+        };
+
         let constraints: Vec<Constraint> = columns
             .iter()
             .map(|col| {
@@ -275,7 +290,9 @@ impl JobsList {
                 // for better display in the jobs list context
                 match col {
                     // Override specific columns that need different constraints in the jobs list
-                    JobColumn::Name => Constraint::Min(15),
+                    JobColumn::Name => name_width
+                        .map(Constraint::Length)
+                        .unwrap_or(Constraint::Percentage(10)),
                     JobColumn::WorkDir => Constraint::Min(20),
                     // For time-related columns, we use a slightly longer constraint
                     JobColumn::SubmitTime | JobColumn::StartTime | JobColumn::EndTime => {
